@@ -1388,3 +1388,48 @@ class SeparateMasks:
         else:
             return torch.empty((1, 64, 64), device=mask.device),
         
+class BatchImageToMask:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+                    "images": ("IMAGE",),
+                    "dilation_amount": ("INT", {"default": 0, "min": 0, "max": 100, "step": 1}),
+                }}
+
+    CATEGORY = "PSNodes/masking"
+    RETURN_TYPES = ("MASK",)
+    RETURN_NAMES = ("MASKS",)
+    FUNCTION = "batch_convert_to_mask"
+    DESCRIPTION = "Converts transparent PNG images to binary masks with optional dilation"
+
+    def batch_convert_to_mask(self, images, dilation_amount):
+        B, H, W, C = images.shape
+        masks = []
+
+        # Convert images to masks based on alpha channel
+        for i in range(B):
+            # Extract alpha channel (assuming RGBA where A is the last channel)
+            mask = images[i, :, :, -1]  # Get alpha channel
+            mask = (mask > 0.5).float()  # Binarize the mask
+            masks.append(mask)
+
+        mask_tensor = torch.stack(masks)
+
+        # Apply morphological dilation if requested
+        if dilation_amount > 0:
+            c = 1  # non-tapered corners
+            kernel = np.array([[c, 1, c],
+                             [1, 1, 1],
+                             [c, 1, c]])
+            
+            dilated_masks = []
+            for m in mask_tensor:
+                output = m.cpu().numpy().astype(np.float32)
+                for _ in range(dilation_amount):
+                    output = scipy.ndimage.grey_dilation(output, footprint=kernel)
+                dilated_masks.append(torch.from_numpy(output))
+            
+            mask_tensor = torch.stack(dilated_masks)
+
+        return (mask_tensor,)
+        

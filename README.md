@@ -1,4 +1,6 @@
-# KJNodes for ComfyUI
+# PSNodes for ComfyUI
+
+A fork of KJNodes for ComfyUI. 
 
 Various quality of life and masking related -nodes and scripts made by combining functionality of existing nodes for ComfyUI.
 

@@ -3,7 +3,13 @@ from torchvision import transforms
 import json
 from PIL import Image, ImageDraw, ImageFont, ImageColor, ImageFilter, ImageChops
 import numpy as np
-from ..utility.utility import pil2tensor, tensor2pil
+import os
+import sys
+
+# Add the parent directory to Python path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from utility.utility import pil2tensor, tensor2pil
 import folder_paths
 import io
 import base64
@@ -1453,41 +1459,40 @@ you can clear the image from the context menu by right clicking on the canvas
                 "result": (json.dumps(pos_coordinates), json.dumps(neg_coordinates), bboxes, mask_tensor, cropped_image)
             }
 
-class CutAndDragOnPath:
+class MultiCutAndDragOnPath:
     RETURN_TYPES = ("IMAGE", "MASK",)
     RETURN_NAMES = ("image","mask", )
-    FUNCTION = "cutanddrag" 
-    CATEGORY = "KJNodes/image"
+    FUNCTION = "multi_cutanddrag" 
+    CATEGORY = "PSNodes/experimental"
     DESCRIPTION = """
-Cuts multiple masked areas from the image, and drags each along its own path. If inpaint is enabled, and no bg_image is provided, the cut areas are filled using cv2 TELEA algorithm.
-
-Each mask in the input mask batch will be paired with a coordinate path at the same index.
-
-The translateAndRotate function additionally rotates the cut regions along their paths.
-When using translate_and_rotate mode, provide an array of degrees where each value corresponds to the total rotation for each mask.
-The length of the degrees array MUST match the number of masks exactly.
-"""
+    Cut and drag parts of an image along specified coordinate paths.
+    Coordinate paths should be an array of arrays containing coordinate objects, e.g.:
+    [
+        [{"x": 400, "y": 240}, {"x": 720, "y": 480}],  # First path
+        [{"x": 720, "y": 480}, {"x": 400, "y": 240}]   # Second path
+    ]
+    """
 
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
                 "image": ("IMAGE",),
-                "coordinate_paths": ("STRING", {"forceInput": True, "multiline": True}),
+                "coordinate_paths": ("STRING", {"forceInput": True}),
                 "masks": ("MASK",),
                 "frame_width": ("INT", {"default": 512,"min": 16, "max": 4096, "step": 1}),
                 "frame_height": ("INT", {"default": 512,"min": 16, "max": 4096, "step": 1}),
                 "inpaint": ("BOOLEAN", {"default": True}),
                 "mode": (["translate", "translate_and_rotate"], {"default": "translate"}),
-        },
-        "optional": {
-            "bg_image": ("IMAGE",),
-            "degrees": ("FLOAT", {"default": [0.0], "min": -360.0, "max": 360.0, "step": 0.1, "forceInput": True}),
+            },
+            "optional": {
+                "bg_image": ("IMAGE",),
+                "degrees": ("FLOAT", {"default": [0.0], "min": -360.0, "max": 360.0, "step": 0.1, "forceInput": True}),
+            }
         }
-    }
 
-    def cutanddrag(self, image, coordinate_paths, masks, frame_width, frame_height, inpaint, rotation=False, bg_image=None, degrees=[0.0]):
-        if rotation:
+    def multi_cutanddrag(self, image, coordinate_paths, masks, frame_width, frame_height, inpaint, rotation=False, bg_image=None, degrees=[0.0]):
+        if not rotation:
             return self._translate(image, coordinate_paths, masks, frame_width, frame_height, inpaint, bg_image)
         else:
             # Verify that degrees array matches number of masks
@@ -1496,14 +1501,9 @@ The length of the degrees array MUST match the number of masks exactly.
             return self._translate_and_rotate(image, coordinate_paths, masks, frame_width, frame_height, inpaint, degrees, bg_image)
 
     def _translate(self, image, coordinate_paths, masks, frame_width, frame_height, inpaint, bg_image=None):
-        # Parse all coordinate paths
-        coordinate_paths = coordinate_paths.split('\n')
-        paths_list = []
-        for path in coordinate_paths:
-            if path.strip():  # Skip empty lines
-                coords = json.loads(path.replace("'", '"'))
-                paths_list.append(coords)
-
+        # Parse coordinate paths as array of arrays
+        paths_list = json.loads(coordinate_paths)
+        
         if len(paths_list) != masks.shape[0]:
             raise ValueError(f"Number of coordinate paths ({len(paths_list)}) must match number of masks ({masks.shape[0]})")
 
@@ -1592,14 +1592,9 @@ The length of the degrees array MUST match the number of masks exactly.
         return (out_images, out_masks)
 
     def _translate_and_rotate(self, image, coordinate_paths, masks, frame_width, frame_height, inpaint, degrees, bg_image=None):
-        # Parse all coordinate paths
-        coordinate_paths = coordinate_paths.split('\n')
-        paths_list = []
-        for path in coordinate_paths:
-            if path.strip():  # Skip empty lines
-                coords = json.loads(path.replace("'", '"'))
-                paths_list.append(coords)
-
+        # Parse coordinate paths as array of arrays
+        paths_list = json.loads(coordinate_paths)
+        
         if len(paths_list) != masks.shape[0]:
             raise ValueError(f"Number of coordinate paths ({len(paths_list)}) must match number of masks ({masks.shape[0]})")
 
