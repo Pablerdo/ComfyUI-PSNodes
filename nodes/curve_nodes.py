@@ -1459,7 +1459,13 @@ class CutAndDragOnPath:
     FUNCTION = "cutanddrag" 
     CATEGORY = "KJNodes/image"
     DESCRIPTION = """
-Cuts the masked area from the image, and drags it along the path. If inpaint is enabled, and no bg_image is provided, the cut area is filled using cv2 TELEA algorithm.
+Cuts multiple masked areas from the image, and drags each along its own path. If inpaint is enabled, and no bg_image is provided, the cut areas are filled using cv2 TELEA algorithm.
+
+Each mask in the input mask batch will be paired with a coordinate path at the same index.
+
+The translateAndRotate function additionally rotates the cut regions along their paths.
+When using translate_and_rotate mode, provide an array of degrees where each value corresponds to the total rotation for each mask.
+The length of the degrees array MUST match the number of masks exactly.
 """
 
     @classmethod
@@ -1467,85 +1473,219 @@ Cuts the masked area from the image, and drags it along the path. If inpaint is 
         return {
             "required": {
                 "image": ("IMAGE",),
-                "coordinates": ("STRING", {"forceInput": True}),
-                "mask": ("MASK",),
+                "coordinate_paths": ("STRING", {"forceInput": True, "multiline": True}),
+                "masks": ("MASK",),
                 "frame_width": ("INT", {"default": 512,"min": 16, "max": 4096, "step": 1}),
                 "frame_height": ("INT", {"default": 512,"min": 16, "max": 4096, "step": 1}),
                 "inpaint": ("BOOLEAN", {"default": True}),
+                "mode": (["translate", "translate_and_rotate"], {"default": "translate"}),
         },
         "optional": {
             "bg_image": ("IMAGE",),
+            "degrees": ("FLOAT", {"default": [0.0], "min": -360.0, "max": 360.0, "step": 0.1, "forceInput": True}),
         }
     }
 
-    def cutanddrag(self, image, coordinates, mask, frame_width, frame_height, inpaint, bg_image=None):
-        # Parse coordinates
-        if len(coordinates) < 10:
-            coords_list = []
-            for coords in coordinates:
-                coords = json.loads(coords.replace("'", '"'))
-                coords_list.append(coords)
+    def cutanddrag(self, image, coordinate_paths, masks, frame_width, frame_height, inpaint, rotation=False, bg_image=None, degrees=[0.0]):
+        if rotation:
+            return self._translate(image, coordinate_paths, masks, frame_width, frame_height, inpaint, bg_image)
         else:
-            coords = json.loads(coordinates.replace("'", '"'))
-            coords_list = [coords]
+            # Verify that degrees array matches number of masks
+            if len(degrees) != masks.shape[0]:
+                raise ValueError(f"Number of rotation degrees ({len(degrees)}) must match number of masks ({masks.shape[0]})")
+            return self._translate_and_rotate(image, coordinate_paths, masks, frame_width, frame_height, inpaint, degrees, bg_image)
 
-        batch_size = len(coords_list[0])
+    def _translate(self, image, coordinate_paths, masks, frame_width, frame_height, inpaint, bg_image=None):
+        # Parse all coordinate paths
+        coordinate_paths = coordinate_paths.split('\n')
+        paths_list = []
+        for path in coordinate_paths:
+            if path.strip():  # Skip empty lines
+                coords = json.loads(path.replace("'", '"'))
+                paths_list.append(coords)
+
+        if len(paths_list) != masks.shape[0]:
+            raise ValueError(f"Number of coordinate paths ({len(paths_list)}) must match number of masks ({masks.shape[0]})")
+
+        batch_size = len(paths_list[0])  # Number of frames to generate
         images_list = []
         masks_list = []
 
-        # Convert input image and mask to PIL
+        # Convert input image to PIL
         input_image = tensor2pil(image)[0]
-        input_mask = tensor2pil(mask)[0]
-
-        # Find masked region bounds
-        mask_array = np.array(input_mask)
-        y_indices, x_indices = np.where(mask_array > 0)
-        if len(x_indices) == 0 or len(y_indices) == 0:
-            return (image, mask)
-            
-        x_min, x_max = x_indices.min(), x_indices.max()
-        y_min, y_max = y_indices.min(), y_indices.max()
         
-        # Cut out the masked region
-        cut_width = x_max - x_min
-        cut_height = y_max - y_min
-        cut_image = input_image.crop((x_min, y_min, x_max, y_max))
-        cut_mask = input_mask.crop((x_min, y_min, x_max, y_max))
-        
-        # Create inpainted background
+        # Create inpainted background once if needed
         if bg_image is None:
             background = input_image.copy()
-            # Inpaint the cut area
             if inpaint:
                 import cv2
-                border = 5 # Create small border around cut area for better inpainting
-                fill_mask = Image.new("L", background.size, 0)
-                draw = ImageDraw.Draw(fill_mask)
-                draw.rectangle([x_min-border, y_min-border, x_max+border, y_max+border], fill=255)
+                # Create combined mask for all cut areas
+                combined_mask = Image.new("L", background.size, 0)
+                draw = ImageDraw.Draw(combined_mask)
+                border = 5
+                
+                for mask_idx in range(masks.shape[0]):
+                    mask_pil = tensor2pil(masks[mask_idx:mask_idx+1])[0]
+                    mask_array = np.array(mask_pil)
+                    y_indices, x_indices = np.where(mask_array > 0)
+                    if len(x_indices) > 0 and len(y_indices) > 0:
+                        x_min, x_max = x_indices.min(), x_indices.max()
+                        y_min, y_max = y_indices.min(), y_indices.max()
+                        draw.rectangle([x_min-border, y_min-border, x_max+border, y_max+border], fill=255)
+                
                 background = cv2.inpaint(
                     np.array(background), 
-                    np.array(fill_mask), 
+                    np.array(combined_mask), 
                     inpaintRadius=3, 
                     flags=cv2.INPAINT_TELEA
                 )
                 background = Image.fromarray(background)
         else:
             background = tensor2pil(bg_image)[0]
-        
-        # Create batch of images with cut region at different positions
-        for i in range(batch_size):
-            # Create new image
+
+        # Cut out each masked region and store info
+        cut_regions = []
+        for mask_idx in range(masks.shape[0]):
+            mask_pil = tensor2pil(masks[mask_idx:mask_idx+1])[0]
+            mask_array = np.array(mask_pil)
+            y_indices, x_indices = np.where(mask_array > 0)
+            
+            if len(x_indices) > 0 and len(y_indices) > 0:
+                x_min, x_max = x_indices.min(), x_indices.max()
+                y_min, y_max = y_indices.min(), y_indices.max()
+                cut_width = x_max - x_min
+                cut_height = y_max - y_min
+                cut_image = input_image.crop((x_min, y_min, x_max, y_max))
+                cut_mask = mask_pil.crop((x_min, y_min, x_max, y_max))
+                cut_regions.append({
+                    'image': cut_image,
+                    'mask': cut_mask,
+                    'width': cut_width,
+                    'height': cut_height,
+                    'coords': paths_list[mask_idx]
+                })
+
+        # Create batch of images with cut regions at different positions
+        for frame_idx in range(batch_size):
             new_image = background.copy()
             new_mask = Image.new("L", (frame_width, frame_height), 0)
 
-            # Get target position from coordinates
-            for coords in coords_list:
-                target_x = int(coords[i]['x'] - cut_width/2)
-                target_y = int(coords[i]['y'] - cut_height/2)
+            # Place each cut region at its position for this frame
+            for region in cut_regions:
+                target_x = int(region['coords'][frame_idx]['x'] - region['width']/2)
+                target_y = int(region['coords'][frame_idx]['y'] - region['height']/2)
+                
+                new_image.paste(region['image'], (target_x, target_y), region['mask'])
+                new_mask.paste(region['mask'], (target_x, target_y))
 
-                # Paste cut region at new position
-                new_image.paste(cut_image, (target_x, target_y), cut_mask)
-                new_mask.paste(cut_mask, (target_x, target_y))
+            # Convert to tensor and append
+            image_tensor = pil2tensor(new_image)
+            mask_tensor = pil2tensor(new_mask)
+            
+            images_list.append(image_tensor)
+            masks_list.append(mask_tensor)
+
+        # Stack tensors into batches
+        out_images = torch.cat(images_list, dim=0).cpu().float()
+        out_masks = torch.cat(masks_list, dim=0)
+
+        return (out_images, out_masks)
+
+    def _translate_and_rotate(self, image, coordinate_paths, masks, frame_width, frame_height, inpaint, degrees, bg_image=None):
+        # Parse all coordinate paths
+        coordinate_paths = coordinate_paths.split('\n')
+        paths_list = []
+        for path in coordinate_paths:
+            if path.strip():  # Skip empty lines
+                coords = json.loads(path.replace("'", '"'))
+                paths_list.append(coords)
+
+        if len(paths_list) != masks.shape[0]:
+            raise ValueError(f"Number of coordinate paths ({len(paths_list)}) must match number of masks ({masks.shape[0]})")
+
+        batch_size = len(paths_list[0])  # Number of frames to generate
+        images_list = []
+        masks_list = []
+
+        # Convert input image to PIL
+        input_image = tensor2pil(image)[0]
+        
+        # Create inpainted background once if needed
+        if bg_image is None:
+            background = input_image.copy()
+            if inpaint:
+                import cv2
+                # Create combined mask for all cut areas
+                combined_mask = Image.new("L", background.size, 0)
+                draw = ImageDraw.Draw(combined_mask)
+                border = 5
+                
+                for mask_idx in range(masks.shape[0]):
+                    mask_pil = tensor2pil(masks[mask_idx:mask_idx+1])[0]
+                    mask_array = np.array(mask_pil)
+                    y_indices, x_indices = np.where(mask_array > 0)
+                    if len(x_indices) > 0 and len(y_indices) > 0:
+                        x_min, x_max = x_indices.min(), x_indices.max()
+                        y_min, y_max = y_indices.min(), y_indices.max()
+                        draw.rectangle([x_min-border, y_min-border, x_max+border, y_max+border], fill=255)
+                
+                background = cv2.inpaint(
+                    np.array(background), 
+                    np.array(combined_mask), 
+                    inpaintRadius=3, 
+                    flags=cv2.INPAINT_TELEA
+                )
+                background = Image.fromarray(background)
+        else:
+            background = tensor2pil(bg_image)[0]
+
+        # Cut out each masked region and store info
+        cut_regions = []
+        for mask_idx in range(masks.shape[0]):
+            mask_pil = tensor2pil(masks[mask_idx:mask_idx+1])[0]
+            mask_array = np.array(mask_pil)
+            y_indices, x_indices = np.where(mask_array > 0)
+            
+            if len(x_indices) > 0 and len(y_indices) > 0:
+                x_min, x_max = x_indices.min(), x_indices.max()
+                y_min, y_max = y_indices.min(), y_indices.max()
+                cut_width = x_max - x_min
+                cut_height = y_max - y_min
+                cut_image = input_image.crop((x_min, y_min, x_max, y_max))
+                cut_mask = mask_pil.crop((x_min, y_min, x_max, y_max))
+                cut_regions.append({
+                    'image': cut_image,
+                    'mask': cut_mask,
+                    'width': cut_width,
+                    'height': cut_height,
+                    'coords': paths_list[mask_idx],
+                    'degrees': degrees[mask_idx]  # Store the rotation amount for this region
+                })
+
+        # Create batch of images with cut regions at different positions
+        for frame_idx in range(batch_size):
+            new_image = background.copy()
+            new_mask = Image.new("L", (frame_width, frame_height), 0)
+
+            # Place each cut region at its position for this frame
+            for region in cut_regions:
+                # Calculate rotation angle for this frame using the region's specific degrees
+                rotation_angle = (region['degrees'] * frame_idx) / (batch_size - 1)
+                
+                # Rotate the cut region and its mask
+                rotated_image = region['image'].rotate(rotation_angle, expand=True, resample=Image.BICUBIC)
+                rotated_mask = region['mask'].rotate(rotation_angle, expand=True, resample=Image.BICUBIC)
+                
+                # Get the new dimensions after rotation
+                rotated_width, rotated_height = rotated_image.size
+                
+                # Calculate the position accounting for the new dimensions
+                target_x = int(region['coords'][frame_idx]['x'] - rotated_width/2)
+                target_y = int(region['coords'][frame_idx]['y'] - rotated_height/2)
+                
+                # Paste the rotated image and mask
+                new_image.paste(rotated_image, (target_x, target_y), rotated_mask)
+                new_mask.paste(rotated_mask, (target_x, target_y))
 
             # Convert to tensor and append
             image_tensor = pil2tensor(new_image)
