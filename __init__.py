@@ -41,6 +41,7 @@ NODE_CONFIG = {
     "ResizeMask": {"class": ResizeMask, "name": "Resize Mask"},
     "RoundMask": {"class": RoundMask, "name": "Round Mask"},
     "SeparateMasks": {"class": SeparateMasks, "name": "Separate Masks"},
+    "MaskBatchMulti": {"class": MaskBatchMulti, "name": "Mask Batch Multi"},
     #images
     "AddLabel": {"class": AddLabel, "name": "Add Label"},
     "ColorMatch": {"class": ColorMatch, "name": "Color Match"},
@@ -176,7 +177,7 @@ NODE_CONFIG = {
     "TorchCompileCosmosModel": {"class": TorchCompileCosmosModel, "name": "TorchCompileCosmosModel"},
     "PathchSageAttentionKJ": {"class": PathchSageAttentionKJ, "name": "Pathch Sage Attention KJ"},
     "LeapfusionHunyuanI2VPatcher": {"class": LeapfusionHunyuanI2V, "name": "Leapfusion Hunyuan I2V Patcher"},
-
+    "MultiCutAndDragOnPath": {"class": MultiCutAndDragOnPath, "name": "Multi Cut And Drag On Path"},
     #instance diffusion
     "CreateInstanceDiffusionTracking": {"class": CreateInstanceDiffusionTracking},
     "AppendInstanceDiffusionTracking": {"class": AppendInstanceDiffusionTracking},
